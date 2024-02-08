@@ -28,6 +28,21 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Threads;
 import org.openjdk.jmh.annotations.Warmup;
 
+/**
+ * The way to develop this:
+ * 1. Make a change
+ * 2. Apply formatting
+ *    ./gradlew spotlessApply
+ * 3. Compile
+ *    ./gradlew build -x test -x integrationTest
+ * 4. Execute
+ *    ./gradlew \
+ *      -DsparkVersions=3.5 \
+ *      :iceberg-spark:iceberg-spark-3.5_2.12:jmh \
+ *      -PjmhIncludeRegex=CsengerGBenchmark \
+ *      -PjmhOutputPath=benchmark/csengerg-benchmark-result.txt
+ */
+
 @Fork(1)
 @State(Scope.Benchmark)
 @Warmup(iterations = 3)
