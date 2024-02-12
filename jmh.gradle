@@ -49,6 +49,7 @@ configure(jmhProjects) {
 
   dependencies {
     jmh 'software.amazon.awssdk:s3:2.23.20'
+    jmh project(":iceberg-api")
     jmh project(":iceberg-aws")
   }
 

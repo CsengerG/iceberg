@@ -13,7 +13,11 @@ My process:
 ```
    ./gradlew build -x test -x integrationTest
 ```
-4. Execute
+4. Set your bucket as env. variable
+```
+    export S3_BUCKET=<your bucket>
+```
+5. Execute
 ```
 ./gradlew \
    -DsparkVersions=3.5 \
