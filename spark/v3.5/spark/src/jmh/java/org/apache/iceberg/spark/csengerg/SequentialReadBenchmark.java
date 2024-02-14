@@ -42,32 +42,26 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 @Fork(1)
 @State(Scope.Benchmark)
-@Warmup(iterations = 3)
-@Measurement(iterations = 10)
+@Warmup(iterations = 1)
+@Measurement(iterations = 1)
 @BenchmarkMode(Mode.SingleShotTime)
-public class CsengerGBenchmark {
-
-  static {
-    System.setProperty("aws.region", "eu-west-1");
-  }
+public class SequentialReadBenchmark extends BenchmarkBase {
 
   // Objects from TPC-DS dataset
   @Param({
-    "ship_mode.dat",
-    "web_site.dat",
-    "promotion.dat",
-    "household_demographics.dat",
-    "catalog_page.dat",
-    "customer_address.dat",
-    "customer.dat",
-    "store_returns.dat",
-    "customer_demographics.dat",
-    "web_sales.dat",
-    "catalog_sales.dat"
+          "ship_mode.dat",
+          "web_site.dat",
+          "promotion.dat",
+          "household_demographics.dat",
+          "catalog_page.dat",
+          "customer_address.dat",
+          "customer.dat",
+          "store_returns.dat",
+          "customer_demographics.dat",
+          "web_sales.dat",
+          "catalog_sales.dat"
   })
   private String key;
-
-  private static final String S3_BUCKET = "<snip>";
 
   private String sync__readObjectFully(String s3Uri) {
     S3Client s3 = S3Client.builder().region(Region.EU_WEST_1).build();

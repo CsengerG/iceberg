@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.io.FileIOMetricsContext;
+import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.metrics.Counter;
@@ -52,7 +53,7 @@ public class S3AsyncInputStream extends SeekableInputStream implements RangeRead
   private InputStream stream;
   private long pos = 0;
   private long next = 0;
-  private int skipSize = 0;
+  private int skipSize = 1024 * 1024;
 
   // Telemetry
   private final Counter readBytes;
@@ -74,11 +75,17 @@ public class S3AsyncInputStream extends SeekableInputStream implements RangeRead
 
   @Override
   public long getPos() throws IOException {
-    return 0;
+    return next;
   }
 
   @Override
-  public void seek(long newPos) throws IOException {}
+  public void seek(long newPos) throws IOException {
+    Preconditions.checkState(!closed, "already closed");
+    Preconditions.checkArgument(newPos >= 0, "position is negative: %s", newPos);
+
+    // this allows a seek beyond the end of the stream but the next read will fail
+    next = newPos;
+  }
 
   @Override
   public int read() throws IOException {
@@ -179,10 +186,28 @@ public class S3AsyncInputStream extends SeekableInputStream implements RangeRead
   }
 
   @Override
-  public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {}
+  public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
+    Preconditions.checkPositionIndexes(offset, offset + length, buffer.length);
+
+    String range = String.format("bytes=%s-%s", position, position + length - 1);
+
+    IOUtil.readFully(readRange(range), buffer, offset, length);
+  }
 
   @Override
   public int readTail(byte[] buffer, int offset, int length) throws IOException {
-    return 0;
+    Preconditions.checkPositionIndexes(offset, offset + length, buffer.length);
+
+    String range = String.format("bytes=-%s", length);
+
+    return IOUtil.readRemaining(readRange(range), buffer, offset, length);
+  }
+
+  private InputStream readRange(String range) {
+    return s3.getObject(x -> x
+            .bucket(location.bucket())
+            .key(location.key())
+            .range(range)
+            .build(), AsyncResponseTransformer.toBlockingInputStream()).join();
   }
 }

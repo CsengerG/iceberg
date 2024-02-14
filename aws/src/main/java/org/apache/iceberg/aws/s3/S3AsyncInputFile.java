@@ -54,7 +54,11 @@ public class S3AsyncInputFile extends BaseS3AsyncFile implements InputFile, Nati
 
   @Override
   public long getLength() {
-    return 0;
+    if (length == null) {
+      this.length = getObjectMetadata().contentLength();
+    }
+
+    return length;
   }
 
   @Override
