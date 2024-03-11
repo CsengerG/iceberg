@@ -204,10 +204,9 @@ public class S3AsyncInputStream extends SeekableInputStream implements RangeRead
   }
 
   private InputStream readRange(String range) {
-    return s3.getObject(x -> x
-            .bucket(location.bucket())
-            .key(location.key())
-            .range(range)
-            .build(), AsyncResponseTransformer.toBlockingInputStream()).join();
+    return s3.getObject(
+            x -> x.bucket(location.bucket()).key(location.key()).range(range).build(),
+            AsyncResponseTransformer.toBlockingInputStream())
+        .join();
   }
 }

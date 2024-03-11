@@ -42,24 +42,24 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 @Fork(1)
 @State(Scope.Benchmark)
-@Warmup(iterations = 1)
-@Measurement(iterations = 1)
+@Warmup(iterations = 3)
+@Measurement(iterations = 25)
 @BenchmarkMode(Mode.SingleShotTime)
-public class SequentialReadBenchmark extends BenchmarkBase {
+public class S3SequentialReadBenchmark extends BenchmarkBase {
 
   // Objects from TPC-DS dataset
   @Param({
-          "ship_mode.dat",
-          "web_site.dat",
-          "promotion.dat",
-          "household_demographics.dat",
-          "catalog_page.dat",
-          "customer_address.dat",
-          "customer.dat",
-          "store_returns.dat",
-          "customer_demographics.dat",
-          "web_sales.dat",
-          "catalog_sales.dat"
+    "ship_mode.dat",
+    "web_site.dat",
+    "promotion.dat",
+    "household_demographics.dat",
+    "catalog_page.dat",
+    "customer_address.dat",
+    "customer.dat",
+    "store_returns.dat",
+    "customer_demographics.dat",
+    "web_sales.dat",
+    "catalog_sales.dat"
   })
   private String key;
 
@@ -91,10 +91,11 @@ public class SequentialReadBenchmark extends BenchmarkBase {
   }
 
   private String http_crt__readObjectFully(String s3Uri) {
-    S3Client s3 = S3Client.builder()
-      .region(Region.EU_WEST_1)
-      .httpClient(AwsCrtHttpClient.builder().build())
-      .build();
+    S3Client s3 =
+        S3Client.builder()
+            .region(Region.EU_WEST_1)
+            .httpClient(AwsCrtHttpClient.builder().build())
+            .build();
 
     try (S3FileIO s3FileIO = new S3FileIO(() -> s3)) {
       InputFile inputFile = s3FileIO.newInputFile(s3Uri);
