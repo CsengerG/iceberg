@@ -30,7 +30,7 @@ import software.amazon.awssdk.services.s3.S3AsyncClient;
 
 public class S3AsyncFileIO implements CredentialSupplier, DelegateFileIO {
   private String credential = null;
-  private S3AsyncClient client = null;
+  private transient volatile S3AsyncClient client;
   private SerializableSupplier<S3AsyncClient> s3;
 
   private S3FileIOProperties s3FileIOProperties;

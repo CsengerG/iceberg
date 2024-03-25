@@ -18,8 +18,11 @@
  */
 package org.apache.iceberg.aws.s3;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import org.apache.iceberg.encryption.NativeFileCryptoParameters;
 import org.apache.iceberg.encryption.NativelyEncryptedFile;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.PositionOutputStream;
@@ -28,6 +31,9 @@ import software.amazon.awssdk.services.s3.S3AsyncClient;
 
 public class S3AsyncOutputFile extends BaseS3AsyncFile
     implements OutputFile, NativelyEncryptedFile {
+
+  private NativeFileCryptoParameters nativeEncryptionParameters;
+
   public S3AsyncOutputFile(
       S3AsyncClient client,
       S3URI s3URI,
@@ -50,24 +56,34 @@ public class S3AsyncOutputFile extends BaseS3AsyncFile
 
   @Override
   public PositionOutputStream create() {
-    return null;
+    if (!exists()) {
+      return createOrOverwrite();
+    } else {
+      throw new AlreadyExistsException("Location already exists: %s", uri());
+    }
   }
 
   @Override
   public PositionOutputStream createOrOverwrite() {
-    return null;
+    try {
+      return new S3AsyncOutputStream(client(), uri(), s3FileIOProperties(), metrics());
+    } catch (IOException e) {
+      throw new UncheckedIOException("Failed to create output stream for location: " + uri(), e);
+    }
   }
 
   @Override
   public InputFile toInputFile() {
-    return null;
+    return new S3AsyncInputFile(client(), uri(), null, s3FileIOProperties(), metrics());
   }
 
   @Override
   public NativeFileCryptoParameters nativeCryptoParameters() {
-    return null;
+    return nativeEncryptionParameters;
   }
 
   @Override
-  public void setNativeCryptoParameters(NativeFileCryptoParameters nativeCryptoParameters) {}
+  public void setNativeCryptoParameters(NativeFileCryptoParameters nativeCryptoParameters) {
+    this.nativeEncryptionParameters = nativeCryptoParameters;
+  }
 }
