@@ -18,6 +18,15 @@
  */
 package org.apache.iceberg.aws.s3;
 
+import io.reactivex.rxjava3.core.Flowable;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.stream.Collectors;
 import org.apache.iceberg.io.BulkDeletionFailureException;
 import org.apache.iceberg.io.CredentialSupplier;
 import org.apache.iceberg.io.DelegateFileIO;
@@ -25,10 +34,39 @@ import org.apache.iceberg.io.FileInfo;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.metrics.MetricsContext;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
+import org.apache.iceberg.relocated.com.google.common.collect.Multimaps;
+import org.apache.iceberg.relocated.com.google.common.collect.SetMultimap;
+import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.relocated.com.google.common.collect.Streams;
 import org.apache.iceberg.util.SerializableSupplier;
+import org.apache.iceberg.util.Tasks;
+import org.apache.iceberg.util.ThreadPools;
+import org.reactivestreams.Publisher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.model.Delete;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
+import software.amazon.awssdk.services.s3.model.GetObjectTaggingRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectTaggingResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
+import software.amazon.awssdk.services.s3.model.PutObjectTaggingRequest;
+import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.Tag;
+import software.amazon.awssdk.services.s3.model.Tagging;
 
 public class S3AsyncFileIO implements CredentialSupplier, DelegateFileIO {
+
+  private static final Logger LOG = LoggerFactory.getLogger(S3AsyncFileIO.class);
+
+  private static volatile ExecutorService executorService;
+
   private String credential = null;
   private transient volatile S3AsyncClient client;
   private SerializableSupplier<S3AsyncClient> s3;
@@ -38,6 +76,8 @@ public class S3AsyncFileIO implements CredentialSupplier, DelegateFileIO {
   private MetricsContext metrics = MetricsContext.nullMetrics();
 
   private transient StackTraceElement[] createStack;
+
+  public S3AsyncFileIO() {}
 
   public S3AsyncFileIO(SerializableSupplier<S3AsyncClient> s3) {
     this(s3, new S3FileIOProperties());
@@ -77,16 +117,185 @@ public class S3AsyncFileIO implements CredentialSupplier, DelegateFileIO {
   }
 
   @Override
-  public void deleteFile(String path) {}
+  public void deleteFile(String path) {
+    if (s3FileIOProperties.deleteTags() != null && !s3FileIOProperties.deleteTags().isEmpty()) {
+      try {
+        tagFileToDelete(path, s3FileIOProperties.deleteTags());
+      } catch (S3Exception e) {
+        LOG.warn("Failed to add delete tags: {} to {}", s3FileIOProperties.deleteTags(), path, e);
+      }
+    }
 
-  @Override
-  public void deleteFiles(Iterable<String> pathsToDelete) throws BulkDeletionFailureException {}
+    if (!s3FileIOProperties.isDeleteEnabled()) {
+      return;
+    }
 
-  @Override
-  public Iterable<FileInfo> listPrefix(String prefix) {
-    return null;
+    S3URI location = new S3URI(path, s3FileIOProperties.bucketToAccessPointMapping());
+    DeleteObjectRequest deleteObjectRequest =
+        DeleteObjectRequest.builder().bucket(location.bucket()).key(location.key()).build();
+
+    client().deleteObject(deleteObjectRequest).join();
+  }
+
+  private ExecutorService executorService() {
+    if (executorService == null) {
+      synchronized (S3FileIO.class) {
+        if (executorService == null) {
+          executorService =
+              ThreadPools.newWorkerPool(
+                  "iceberg-s3fileio-delete", s3FileIOProperties.deleteThreads());
+        }
+      }
+    }
+
+    return executorService;
+  }
+
+  private List<String> deleteBatch(String bucket, Collection<String> keysToDelete) {
+    List<ObjectIdentifier> objectIds =
+        keysToDelete.stream()
+            .map(key -> ObjectIdentifier.builder().key(key).build())
+            .collect(Collectors.toList());
+
+    DeleteObjectsRequest request =
+        DeleteObjectsRequest.builder()
+            .bucket(bucket)
+            .delete(Delete.builder().objects(objectIds).build())
+            .build();
+    List<String> failures = Lists.newArrayList();
+    try {
+      DeleteObjectsResponse response = client().deleteObjects(request).join();
+      if (response.hasErrors()) {
+        failures.addAll(
+            response.errors().stream()
+                .map(error -> String.format("s3://%s/%s", request.bucket(), error.key()))
+                .collect(Collectors.toList()));
+      }
+    } catch (Exception e) {
+      LOG.warn("Encountered failure when deleting batch", e);
+      failures.addAll(
+          request.delete().objects().stream()
+              .map(obj -> String.format("s3://%s/%s", request.bucket(), obj.key()))
+              .collect(Collectors.toList()));
+    }
+
+    return failures;
   }
 
   @Override
-  public void deletePrefix(String prefix) {}
+  public void deletePrefix(String prefix) {
+    deleteFiles(() -> Streams.stream(listPrefix(prefix)).map(FileInfo::location).iterator());
+  }
+
+  @Override
+  public void deleteFiles(Iterable<String> paths) throws BulkDeletionFailureException {
+    if (s3FileIOProperties.deleteTags() != null && !s3FileIOProperties.deleteTags().isEmpty()) {
+      Tasks.foreach(paths)
+          .noRetry()
+          .executeWith(executorService())
+          .suppressFailureWhenFinished()
+          .onFailure(
+              (path, exc) ->
+                  LOG.warn(
+                      "Failed to add delete tags: {} to {}",
+                      s3FileIOProperties.deleteTags(),
+                      path,
+                      exc))
+          .run(path -> tagFileToDelete(path, s3FileIOProperties.deleteTags()));
+    }
+
+    if (s3FileIOProperties.isDeleteEnabled()) {
+      SetMultimap<String, String> bucketToObjects =
+          Multimaps.newSetMultimap(Maps.newHashMap(), Sets::newHashSet);
+      List<Future<List<String>>> deletionTasks = Lists.newArrayList();
+      for (String path : paths) {
+        S3URI location = new S3URI(path, s3FileIOProperties.bucketToAccessPointMapping());
+        String bucket = location.bucket();
+        String objectKey = location.key();
+        bucketToObjects.get(bucket).add(objectKey);
+        if (bucketToObjects.get(bucket).size() == s3FileIOProperties.deleteBatchSize()) {
+          Set<String> keys = Sets.newHashSet(bucketToObjects.get(bucket));
+          Future<List<String>> deletionTask =
+              executorService().submit(() -> deleteBatch(bucket, keys));
+          deletionTasks.add(deletionTask);
+          bucketToObjects.removeAll(bucket);
+        }
+      }
+
+      // Delete the remainder
+      for (Map.Entry<String, Collection<String>> bucketToObjectsEntry :
+          bucketToObjects.asMap().entrySet()) {
+        String bucket = bucketToObjectsEntry.getKey();
+        Collection<String> keys = bucketToObjectsEntry.getValue();
+        Future<List<String>> deletionTask =
+            executorService().submit(() -> deleteBatch(bucket, keys));
+        deletionTasks.add(deletionTask);
+      }
+
+      int totalFailedDeletions = 0;
+
+      for (Future<List<String>> deletionTask : deletionTasks) {
+        try {
+          List<String> failedDeletions = deletionTask.get();
+          failedDeletions.forEach(path -> LOG.warn("Failed to delete object at path {}", path));
+          totalFailedDeletions += failedDeletions.size();
+        } catch (ExecutionException e) {
+          LOG.warn("Caught unexpected exception during batch deletion: ", e.getCause());
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          deletionTasks.stream().filter(task -> !task.isDone()).forEach(task -> task.cancel(true));
+          throw new RuntimeException("Interrupted when waiting for deletions to complete", e);
+        }
+      }
+
+      if (totalFailedDeletions > 0) {
+        throw new BulkDeletionFailureException(totalFailedDeletions);
+      }
+    }
+  }
+
+  private void tagFileToDelete(String path, Set<Tag> deleteTags) throws S3Exception {
+    S3URI location = new S3URI(path, s3FileIOProperties.bucketToAccessPointMapping());
+    String bucket = location.bucket();
+    String objectKey = location.key();
+
+    GetObjectTaggingRequest getObjectTaggingRequest =
+        GetObjectTaggingRequest.builder().bucket(bucket).key(objectKey).build();
+    GetObjectTaggingResponse getObjectTaggingResponse =
+        client().getObjectTagging(getObjectTaggingRequest).join();
+    // Get existing tags, if any and then add the delete tags
+    Set<Tag> tags = Sets.newHashSet();
+    if (getObjectTaggingResponse.hasTagSet()) {
+      tags.addAll(getObjectTaggingResponse.tagSet());
+    }
+
+    tags.addAll(deleteTags);
+    PutObjectTaggingRequest putObjectTaggingRequest =
+        PutObjectTaggingRequest.builder()
+            .bucket(bucket)
+            .key(objectKey)
+            .tagging(Tagging.builder().tagSet(tags).build())
+            .build();
+
+    client().putObjectTagging(putObjectTaggingRequest).join();
+  }
+
+  @Override
+  public Iterable<FileInfo> listPrefix(String prefix) {
+    S3URI s3uri = new S3URI(prefix, s3FileIOProperties.bucketToAccessPointMapping());
+    ListObjectsV2Request request =
+        ListObjectsV2Request.builder().bucket(s3uri.bucket()).prefix(s3uri.key()).build();
+
+    Publisher<ListObjectsV2Response> publisher = client().listObjectsV2Paginator(request);
+
+    return Flowable.fromPublisher(publisher)
+        .flatMap(r -> Flowable.fromStream(r.contents().stream()))
+        .map(
+            o ->
+                new FileInfo(
+                    String.format("%s://%s/%s", s3uri.scheme(), s3uri.bucket(), o.key()),
+                    o.size(),
+                    o.lastModified().toEpochMilli()))
+        .blockingIterable();
+  }
 }
