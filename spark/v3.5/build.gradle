@@ -77,6 +77,9 @@ project(":iceberg-spark:iceberg-spark-${sparkMajorVersion}_${scalaVersion}") {
     implementation libs.parquet.column
     implementation libs.parquet.hadoop
 
+    // https://mvnrepository.com/artifact/software.amazon.awssdk.crt/aws-crt
+    implementation 'software.amazon.awssdk.crt:aws-crt:0.29.17'
+
     implementation("${libs.orc.core.get().module}:${libs.versions.orc.get()}:nohive") {
       exclude group: 'org.apache.hadoop'
       exclude group: 'commons-lang'
